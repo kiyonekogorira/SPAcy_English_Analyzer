@@ -1,0 +1,29 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-file.txt
+.tox/
+.coverage
+.pytest_cache/
+htmlcov/
+.ipynb_checkpoints
+.mypy_cache/
+.ruff_cache/
+.vscode/
+*.sqlite3
+*.db
+
+# Streamlit
+.streamlit/local/
+.streamlit/secret.toml
+
+# Environment variables
+.env
