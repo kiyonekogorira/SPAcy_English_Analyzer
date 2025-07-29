@@ -1,2 +1,2 @@
-[general]
-python_version = "3.9"
+[theme]
+base = "light"
