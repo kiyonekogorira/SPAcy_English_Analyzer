@@ -1374,5 +1374,790 @@ SVOO文型の場合に、構成要素の表示順序を例文中の単語の並�
   が向上する可能性があります。
  これで、en_core_web_mdモデルへの切り替えと関連ファイルの更新が完了しました。
 
- 
+   現在のロジック：
+
+   1 if o1 and c and (c.dep_ == "oprd" or (c.head == v and o1.head == v)):
+   2     pattern = "SVOC (第5文型)"
+
+  この条件では、c.head == v と o1.head == v
+  の部分が広すぎ、多くのSVO文をSVOCと誤判定する可能性があります。oprd (object predicate)
+  という依存関係ラベルが正しく付与されている場合にのみSVOCと判定するのが、より確実です。
+
+  修正後のロジック：
+
+   1 if o1 and c and c.dep_ == "oprd":
+   2     pattern = "SVOC (第5文型)"
+
+  この修正により、「She made me happy.」のような文で、happy が me
+  の補語（oprd）であると正しく解析され、SVOC文型として判定されるようになります。
+
+  ✦ 「She made me happy.」がSVO（第3文型）と誤判定される問題について、原因を特定しました。
+
+  find_sentence_elements
+  関数内の文型判定ロジックにおいて、SVOC（第5文型）の判定条件が厳しすぎたことが原因です。特に、complement
+  の依存関係が oprd であることのみをチェックしていたため、spaCy が ccomp と解析するケース（「She made me
+  happy.」の happy のように）を捉えきれていませんでした。
+
+  前回の修正で elements["dobj"] と elements["complement"]
+  が正しく設定されるようになったにもかかわらず、その後の文型判定で c.dep_ == "oprd"
+  の条件が満たされず、結果としてSVOと判定されていました。
+
+  この問題を解決するため、SVOCの判定条件をより汎用的に変更します。elements["dobj"]（目的語）と
+  elements["complement"]（補語）の両方が存在する場合に、SVOCと判定するように修正します。
+
+  文型判定ロジックの精査ですね。app.py の find_sentence_elements 関数内の文型判定部分について確認しました。
+
+  現在の文型判定ロジックは以下のようになっています。
+
+    1             s = elements["subject"]
+    2             v = elements["verb"]
+    3             o1 = elements["dobj"]
+    4             o2 = elements["iobj"]
+    5             c = elements["complement"]
+    6 
+    7             if s and v:
+    8                 # 1. SVOC (最も具体的)
+    9                 if o1 and c:
+   10                     pattern = "SVOC (第5文型)"
+   11                 # 2. SVOO
+   12                 elif o1 and o2:
+   13                     pattern = "SVOO (第4文型)"
+   14                 # 3. SVO
+   15                 elif o1:
+   16                     pattern = "SVO (第3文型)"
+   17                 # 4. SVC
+   18                 elif c:
+   19                     pattern = "SVC (第2文型)"
+   20                 # 5. SV (最も一般的)
+   21                 else:
+   22                     pattern = "SV (第1文型)"
+
+  このロジックは、主語(S)と動詞(V)が存在することを前提に、より多くの要素を含む文型から順に判定していくという
+  一般的なアプローチを取っており、優先順位は妥当です。
+
+  しかし、SVOC（第5文型）の判定条件 if o1 and c: は、目的語(O1)と補語(C)が存在すればSVOCと判定するため、spaCy
+  の依存関係解析が常に完璧ではない場合、誤判定を引き起こす可能性があります。例えば、「She made me
+  happy.」のケースでは、happy が me の補語として機能していることをより厳密に確認する必要があります。
+
+  そこで、SVOCの判定条件を以下のように変更することを提案します。
+
+   1                 # 1. SVOC (第5文型)
+   2                 # 目的語(o1)と補語(c)が存在し、かつ補語(c)が目的語(o1)の補語(oprd)であるか、
+   3                 # または補語(c)のheadが目的語(o1)であり、目的語(o1)のheadが動詞(v)である場合
+   4                 if o1 and c and (c.dep_ == "oprd" or (c.head == o1 and o1.head == v)):
+   5                     pattern = "SVOC (第5文型)"
+
+  変更の意図:
+
+   * c.dep_ == "oprd": spaCy が oprd (object predicate) と正しく解析した場合にSVOCと判定します。
+   * c.head == o1 and o1.head == v: happy のheadが me であり、me のheadが made
+     であるという階層関係をチェックします。これは、「make O C」のような構文で spaCy が me を dobj、happy を
+     acomp や attr として解析し、happy のheadがmeになるケースをカバーします。
+
+  この修正により、より多くのSVOCパターンを正確に捉えつつ、誤判定を減らすことを目指します。
+
+✦ temp_spacy_analysis.py ファイルを作成しました。次に、このファイルを実行して、「She made me
+  happy.」のspaCy解析結果を取得します。
+
+   より確実な方法として、Pythonコードを一時ファイルに書き込み、その一時ファイルを実行することで、この問題を回
+  避します。
+
+  まず、「She made me happy.」のspaCy解析結果を出力するPythonコードを一時ファイル temp_spacy_analysis.py
+  に書き込みます。
+ ╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ✔  WriteFile Writing to spacy_app\temp_spacy_analysis.py                                            │
+ │                                                                                                     │
+ │    1 import spacy                                                                                   │
+ │    2 nlp = spacy.load('en_core_web_md')                                                             │
+ │    3 doc = nlp('She made me happy.')                                                                │
+ │    4 for token in doc:                                                                              │
+ │    5     print(f'{token.text}{token.dep_}{token.head.text}{token.pos_}')  
+
+
+ 文型判定ロジックの精査を承知いたしました。
+
+  現在の find_sentence_elements 関数内の文型判定ロジックは以下のようになっています。
+
+    1             s = elements["subject"]
+    2             v = elements["verb"]
+    3             o1 = elements["dobj"]
+    4             o2 = elements["iobj"]
+    5             c = elements["complement"]
+    6
+    7             if s and v:
+    8                 # 1. SVOC (最も具体的)
+    9                 # 目的語(o1)と補語(c)が存在し、かつ以下のいずれかの条件を満たす場合:
+   10                 #   - 補語(c)が目的語(o1)の補語(oprd)である
+   11                 #   - 補語(c)のheadが目的語(o1)であり、目的語(o1)のheadが動詞(v)である (例: make O
+      C)
+   12                 #   - 補語(c)のheadが動詞(v)であり、かつ目的語(o1)がその補語(c)の主語(nsubj)である
+      (例: made me happy)
+   13                 if o1 and c and (\
+   14                     c.dep_ == "oprd" or \
+   15                     (c.head == o1 and o1.head == v) or \
+   16                     (c.head == v and o1.dep_ == "nsubj" and o1.head == c)\
+   17                 ):
+   18                     pattern = "SVOC (第5文型)"
+   19                 # 2. SVOO
+   20                 elif o1 and o2:
+   21                     pattern = "SVOO (第4文型)"
+   22                 # 3. SVO
+   23                 elif o1:
+   24                     pattern = "SVO (第3文型)"
+   25                 # 4. SVC
+   26                 elif c:
+   27                     pattern = "SVC (第2文型)"
+   28                 # 5. SV (最も一般的)
+   29                 else:
+   30                     pattern = "SV (第1文型)"
+
+  このロジックは、SVOCの判定条件がかなり詳細になり、「She made me
+  happy.」のようなケースもカバーできるようになりました。
+
+  精査結果と今後の改善点:
+
+   1. 優先順位の妥当性:
+       * SVOC -> SVOO -> SVO -> SVC -> SV
+         の順序は、より多くの要素を含む文型から判定していくため、基本的に妥当です。
+
+   2. SVOC判定の強化:
+       * 現在のSVOC判定条件は、oprd、make O C 型、made me happy
+         型の3つのパターンをカバーしており、かなり堅牢になっています。
+
+   3. SVCとSVOの競合の可能性:
+       * elif o1: (SVO) と elif c: (SVC) の順序は重要です。もし o1 と c の両方が存在し、かつSVOCの条件を満たさ
+         ない場合、どちらが先に判定されるかによって結果が変わります。現在のロジックでは、o1
+         が存在すればSVOと判定され、その後に c が存在してもSVCとは判定されません。
+       * 例えば、「He became a doctor.」のようなSVC文で、a doctor が dobj
+         と誤解析された場合、SVOと判定されてしまう可能性があります。
+       * 理想的には、SVCとSVOの判定は、それぞれの文型に特有の依存関係や品詞のパターンをより厳密にチェックする必
+         要があります。
+
+  提案:
+
+  SVCとSVOの判定ロジックをより厳密にするために、以下のように修正することを提案します。
+
+    1                 # 1. SVOC (最も具体的)
+    2                 # 目的語(o1)と補語(c)が存在し、かつ以下のいずれかの条件を満たす場合:
+    3                 #   - 補語(c)が目的語(o1)の補語(oprd)である
+    4                 #   - 補語(c)のheadが目的語(o1)であり、目的語(o1)のheadが動詞(v)である (例: make O
+      C)
+    5                 #   - 補語(c)のheadが動詞(v)であり、かつ目的語(o1)がその補語(c)の主語(nsubj)である
+      (例: made me happy)
+    6                 if o1 and c and (\
+    7                     c.dep_ == "oprd" or \
+    8                     (c.head == o1 and o1.head == v) or \
+    9                     (c.head == v and o1.dep_ == "nsubj" and o1.head == c)\
+   10                 ):
+   11                     pattern = "SVOC (第5文型)"
+   12                 # 2. SVOO
+   13                 elif o1 and o2:
+   14                     pattern = "SVOO (第4文型)"
+   15                 # 3. SVC
+   16                 # 補語(c)が存在し、かつ動詞(v)がbe動詞やlinking verb（become, seemなど）である場合
+   17                 elif c and v.lemma_ in ["be", "become", "seem", "look", "feel", "sound", "taste",
+      "smell", "get", "grow", "turn", "remain", "stay"]:
+   18                     pattern = "SVC (第2文型)"
+   19                 # 4. SVO
+   20                 elif o1:
+   21                     pattern = "SVO (第3文型)"
+   22                 # 5. SV (最も一般的)
+   23                 else:
+   24                     pattern = "SV (第1文型)"
+
+  変更の意図:
+
+   * SVCの優先順位をSVOより高くする: SVCは補語が主語の状態を説明する文型であり、SVOとは明確に区別されるべきです
+     。そのため、SVCの判定をSVOより前に行います。
+   * SVCの条件を厳密化: c が存在することに加えて、v がbe動詞やlinking
+     verb（連結動詞）であるかをチェックします。これにより、SVOとSVCの誤判定を減らします。
+
+     SVCとSVOの判定ロジックの改善を確認するには、以下のような例文で試していただくのが効果的です。
+
+   * SVCの例:
+       * "She is a singer." (SVC)
+       * "He became a doctor." (SVC)
+       * "The food tastes good." (SVC)
+
+   * SVOの例:
+       * "She eats an apple." (SVO)
+       * "He reads a book." (SVO)
+
+  もしよろしければ、これらの例文を試して結果を教えていただけますか？私が代わりにテストすることも可能です。
+
+╭────────────────────────────────────────────────────────────╮
+│  > 代わりにテストしてください、でもどうやってやるんですか  │
+╰────────────────────────────────────────────────────────────╯
+
+✦ 承知いたしました。私が代わりにテストを行います。
+
+  Streamlitアプリケーションは直接コマンドラインで実行して結果を得ることが難しいため、app.pyから文型判定ロジック
+  を抽出し、テスト用のPythonスクリプトを作成して実行します。
+
+  以下の手順でテストを行います。
+
+   1. app.pyから必要な関数（find_sentence_elements）と定数（DEP_MAP, POS_MAP）を読み込みます。
+   2. テスト用のPythonスクリプトを生成します。このスクリプトは、指定された例文に対してfind_sentence_elements関数
+      を実行し、その結果（文型）を出力します。
+   3. 生成したスクリプトを一時ファイルに保存します。
+   4. run_shell_commandツールを使って、その一時ファイルを実行し、結果を取得します。
+   5. 取得した結果をユーザーに報告します。
+
+
+   テスト用のPythonスクリプトを作成します。このスクリプトは、app.pyからload_spacy_model関数とfind_senten
+  ce_elements関数を抽出し、各例文に対して文型判定を行い、その結果を出力します。
+ ╭─────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ✔  WriteFile Writing to spacy_app\test_sentence_patterns.py                                         │
+ │                                                                                                     │
+ │    ... first 14 lines hidden ...                                                                    │
+ │     14                                                                                              │
+ │     15 # --- 解析関数 (app.pyから抽出) ---                                                          │
+ │     16 def find_sentence_elements(doc):                                                             │
+ │     17     elements = {"subject": None, "verb": None, "dobj": None, "iobj": None, "complement":     │
+ │        None, "agent": None, "voice": "能動態"}                                                      │
+ │     18     pattern = "不明"                                                                         │
+ │     19                                                                                              │
+ │     20     passive_verb = None                                                                      │
+ │     21     passive_aux = None                                                                       │
+ │     22                                                                                              │
+ │     23     for token in doc:                                                                        │
+ │     24         if token.dep_ == "auxpass":                                                          │
+ │     25             passive_aux = token                                                              │
+ │     26             passive_verb = token.head                                                        │
+ │     27             break                                                                            │
+ │     28                                                                                              │
+ │     29     if passive_verb and passive_aux:                                                         │
+ │     30         elements["voice"] = "受動態"                                                         │
+ │     31         elements["verb"] = passive_verb                                                      │
+ │     32                                                                                              │
+ │     33         for child in passive_verb.children:                                                  │
+ │     34             if child.dep_ == "nsubjpass":                                                    │
+ │     35                 elements["subject"] = child                                                  │
+ │     36                 break                                                                        │
+ │     37                                                                                              │
+ │     38         for child in passive_verb.children:                                                  │
+ │     39             if child.dep_ == "agent":                                                        │
+ │     40                 for grand_child in child.children:                                           │
+ │     41                     if grand_child.dep_ == "pobj":                                           │
+ │     42                         elements["agent"] = grand_child                                      │
+ │     43                         break                                                                │
+ │     44                 break                                                                        │
+ │     45                                                                                              │
+ │     46         for child in passive_verb.children:                                                  │
+ │     47             if child.dep_ in ["attr", "acomp", "oprd"]:                                      │
+ │     48                 elements["complement"] = child                                               │
+ │     49                 break                                                                        │
+ │     50                                                                                              │
+ │     51         pattern = "受動態の文"                                                               │
+ │     52                                                                                              │
+ │     53     else:                                                                                    │
+ │     54         elements["voice"] = "能動態"                                                         │
+ │     55         main_verb = None                                                                     │
+ │     56         for token in doc:                                                                    │
+ │     57             if token.dep_ == "ROOT" and token.pos_ in ["VERB", "AUX"]:                       │
+ │     58                 main_verb = token                                                            │
+ │     59                 break                                                                        │
+ │     60                                                                                              │
+ │     61         if main_verb:                                                                        │
+ │     62             elements["verb"] = main_verb                                                     │
+ │     63                                                                                              │
+ │     64             for child in main_verb.children:                                                 │
+ │     65                 if child.dep_ == "nsubj":                                                    │
+ │     66                     elements["subject"] = child                                              │
+ │     67                     break                                                                    │
+ │     68                                                                                              │
+ │     69             for child in main_verb.children:                                                 │
+ │     70                 if child.dep_ == "dobj":                                                     │
+ │     71                     elements["dobj"] = child                                                 │
+ │     72                 if child.dep_ in ["iobj", "dative"]:                                         │
+ │     73                     elements["iobj"] = child                                                 │
+ │     74                 if child.dep_ in ["attr", "acomp", "oprd"]:                                  │
+ │     75                     elements["complement"] = child                                           │
+ │     76                                                                                              │
+ │     77             if not elements["dobj"] and not elements["complement"] and main_verb:            │
+ │     78                 for child in main_verb.children:                                             │
+ │     79                     if child.dep_ == "ccomp":                                                │
+ │     80                         ccomp_token = child                                                  │
+ │     81                         ccomp_subject = next((grandchild for grandchild in                   │
+ │        ccomp_token.children if grandchild.dep_ == "nsubj"), None)                                   │
+ │     82                                                                                              │
+ │     83                         if ccomp_subject and ccomp_token.pos_ in ["ADJ", "NOUN", "PROPN"]:   │
+ │     84                             elements["dobj"] = ccomp_subject                                 │
+ │     85                             elements["complement"] = ccomp_token                             │
+ │     86                             break                                                            │
+ │     87                                                                                              │
+ │     88             s = elements["subject"]                                                          │
+ │     89             v = elements["verb"]                                                             │
+ │     90             o1 = elements["dobj"]                                                            │
+ │     91             o2 = elements["iobj"]                                                            │
+ │     92             c = elements["complement"]                                                       │
+ │     93                                                                                              │
+ │     94             if s and v:                                                                      │
+ │     95                 if o1 and c and (\                                                           │
+ │     96                     c.dep_ == "oprd" or \                                                    │
+ │     97                     (c.head == o1 and o1.head == v) or \                                     │
+ │     98                     (c.head == v and o1.dep_ == "nsubj" and o1.head == c)\                   │
+ │     99                 ):                                                                           │
+ │    100                     pattern = "SVOC (第5文型)"                                               │
+ │    101                 elif o1 and o2:                                                              │
+ │    102                     pattern = "SVOO (第4文型)"                                               │
+ │    103                 elif c and v.lemma_ in ["be", "become", "seem", "look", "feel", "sound",     │
+ │        "taste", "smell", "get", "grow", "turn", "remain", "stay"]:                                  │
+ │    104                     pattern = "SVC (第2文型)"                                                │
+ │    105                 elif o1:                                                                     │
+ │    106                     pattern = "SVO (第3文型)"                                                │
+ │    107                 else:                                                                        │
+ │    108                     pattern = "SV (第1文型)"                                                 │
+ │    109                                                                                              │
+ │    110     elements["pattern_name"] = pattern                                                       │
+ │    111     return pattern, elements                                                                 │
+ │    112                                                                                              │
+ │    113 # --- テスト実行部分 ---                                                                     │
+ │    114 nlp = load_spacy_model("en_core_web_md")                                                     │
+ │    115                                                                                              │
+ │    116 test_sentences = [                                                                           │
+ │    117     "She is a singer.", # SVC                                                                │
+ │    118     "He became a doctor.", # SVC                                                             │
+ │    119     "The food tastes good.", # SVC                                                           │
+ │    120     "She eats an apple.", # SVO                                                              │
+ │    121     "He reads a book.", # SVO                                                                │
+ │    122     "She made me happy.", # SVOC (再確認)                                                    │
+ │    123     "We call him John.", # SVOC                                                              │
+ │    124     "The birds are flying in the sky.", # SV                                                 │
+ │    125     "He gave me a beautiful present.", # SVOO                                                │
+ │    126 ]                                                                                            │
+ │    127                                                                                              │
+ │    128 print("--- 文型判定テスト結果 ---")                                                          │
+ │    129 for sentence in test_sentences:                                                              │
+ │    130     doc = nlp(sentence)                                                                      │
+ │    131     pattern, _ = find_sentence_elements(doc)                                                 │
+ │    132     print(f"例文: '{sentence}' -> 判定文型: {pattern}")                                      │
+ ╰─────────────────────────────────────────────────────────────────────────────────────────────────────╯
+✦ テストスクリプト test_sentence_patterns.py を作成しました。
+
+✦ 文型判定ロジックのさらなる弱点として、「前置詞句による間接目的語の未検出」が挙げられます。
+
+   * 現状: "He gave a book to me." のような文で、to me
+     が間接目的語として認識されず、SVOOではなくSVOと判定される可能性があります。
+   * 理由: 現在の elements["iobj"] の検出が iobj または dative
+     の依存関係を持つトークンに限定されているため、前置詞句による間接目的語は検出されません。
+
+  この弱点を改善するため、find_sentence_elements 関数内の iobj
+  検出部分に、前置詞句による間接目的語を考慮するロジックを追加します。
+
+  `find_sentence_elements` 関数内の `iobj` 検出部分の修正案:
+
+    1             # 目的語と補語を探す
+    2             # Initial pass for direct children
+    3             for child in main_verb.children:
+    4                 if child.dep_ == "dobj":
+    5                     elements["dobj"] = child
+    6                 if child.dep_ in ["iobj", "dative"]:
+    7                     elements["iobj"] = child
+    8                 if child.dep_ in ["attr", "acomp", "oprd"]:
+    9                     elements["complement"] = child
+   10
+   11             # Special handling for indirect objects introduced by prepositions (e.g., "to me",
+      "for him")
+   12             if not elements["iobj"] and main_verb: # 間接目的語がまだ見つかっていない場合のみ
+   13                 for child in main_verb.children:
+   14                     if child.dep_ == "prep" and child.text.lower() in ["to", "for"]: #
+      前置詞が"to"または"for"の場合
+   15                         # Check if the preposition has a pobj (object of preposition)
+   16                         pobj_token = next((grandchild for grandchild in child.children if
+      grandchild.dep_ == "pobj"), None)
+   17                         if pobj_token:
+   18                             elements["iobj"] = pobj_token # 前置詞の目的語を間接目的語として扱う
+   19                             break # Found indirect object, exit loop
+
+  この修正により、「He gave a book to me.」のような文がSVOOと正しく判定されるようになるはずです。
+ 前置詞句による間接目的語の検出ロジックをapp.pyに適用しました。
+
+
+文型判定ロジックのさらなる弱点として、「節（Clause）が主語、目的語、補語となる場合の未対応」が挙げられます。
+
+  現在のロジックでは、nsubj (名詞主語)、dobj (直接目的語)、attr/acomp/oprd (補語)
+  といった、主に単一のトークンや単純な句が主要素となるケースを検出しています。しかし、spaCy は節を csubj
+  (clausal subject)、cobj (clausal object)、xcomp (open clausal complement)
+  などの依存関係で解析します。これらの依存関係を持つ節が文の主要素となる場合、現在のロジックでは正しく検出さ
+  れず、誤った文型が判定される可能性があります。
+
+  例:
+
+   * 主語が節の場合 (SV): "That he is rich is obvious."
+       * is が動詞、That he is rich が主語（csubj）ですが、現在のelements["subject"]の検出では見落とされます。
+         結果としてSVと判定されない可能性があります。
+   * 目的語が節の場合 (SVO): "I know that he is rich."
+       * know が動詞、I が主語、that he is rich が目的語（cobj）ですが、現在のelements["dobj"]の検出では見落と
+         されます。結果としてSVOと判定されない可能性があります。
+   * 動詞の補語が節の場合 (SVC): "The problem is that he is rich."
+       * is が動詞、The problem が主語、that he is rich
+         が補語（attrやacompとして解析されることもありますが、ccompやxcompの可能性もあります）ですが、現在のele
+         ments["complement"]の検出では見落とされる可能性があります。
+   * SVOCで動詞の後に不定詞句や動名詞句が続く場合 (SVOC): "I want him to go." / "I saw him leaving."
+       * to go や leaving は xcomp
+         として解析されることが多く、現在のSVOC判定ロジックではカバーしきれない可能性があります。
+
+  この弱点を改善するため、find_sentence_elements
+  関数内の主要素（主語、目的語、補語）の検出部分を拡張し、csubj, cobj, xcomp
+  などの節を表す依存関係も考慮するように修正することを提案します。
+
+  `find_sentence_elements` 関数内の修正案:
+
+    1             # 能動態の主語 (nsubj, csubj) を探す
+    2             for child in main_verb.children:
+    3                 if child.dep_ == "nsubj" or child.dep_ == "csubj": # csubjを追加
+    4                     elements["subject"] = child
+    5                     break
+    6
+    7             # 目的語と補語を探す
+    8             # Initial pass for direct children
+    9             for child in main_verb.children:
+   10                 if child.dep_ == "dobj" or child.dep_ == "cobj": # cobjを追加
+   11                     elements["dobj"] = child
+   12                 if child.dep_ in ["iobj", "dative"]:
+   13                     elements["iobj"] = child
+   14                 if child.dep_ in ["attr", "acomp", "oprd"]:
+   15                     elements["complement"] = child
+   16
+   17             # Special handling for indirect objects introduced by prepositions (e.g., "to me",
+      "for him")
+   18             # ... (既存のロジック) ...
+   19
+   20             # Special handling for SVOC where spaCy might use \'ccomp\' or \'xcomp\' for the
+      complement
+   21             # and \'nsubj\' for the object within that \'ccomp\' or \'xcomp\'
+   22             # Example: "She made me happy." (ccomp), "I saw him leave." (xcomp)
+   23             if not elements["dobj"] and not elements["complement"] and main_verb:
+   24                 for child in main_verb.children:
+   25                     if child.dep_ == "ccomp" or child.dep_ == "xcomp": # xcompを追加
+   26                         comp_token = child # ccomp_tokenからcomp_tokenにリネーム
+   27                         comp_subject = next((grandchild for grandchild in comp_token.children if
+      grandchild.dep_ == "nsubj"), None)
+   28
+   29                         #
+      補語が形容詞、名詞、固有名詞、または動詞（不定詞句や動名詞句の場合）である場合
+   30                         if comp_subject and comp_token.pos_ in ["ADJ", "NOUN", "PROPN", "VERB"]: #
+      VERBを追加
+   31                             elements["dobj"] = comp_subject
+   32                             elements["complement"] = comp_token
+   33                             break
+
+  この修正により、節が文の主要素となる複雑な文構造もより正確に解析し、文型を判定できるようになります。
+
+
+ app.py の find_sentence_elements
+  関数内の主語、目的語、補語の検出部分を、節（Clause）が主要素となる場合も考慮するように修正します。
+
+  節が文の主要素となる複雑な文構造もより正確に解析し、文型を判定できるようになります。
+
+  この変更をテストするために、以下の例文でテストを実行します。
+
+   * 主語が節の場合 (SV): "That he is rich is obvious."
+   * 目的語が節の場合 (SVO): "I know that he is rich."
+   * 動詞の補語が節の場合 (SVC): "The problem is that he is rich."
+   * SVOCで動詞の後に不定詞句や動名詞句が続く場合 (SVOC): "I want him to go."
+   * SVOCで動詞の後に不定詞句や動名詞句が続く場合 (SVOC): "I saw him leaving."
+
+
+SVOCの2つの例文は正しく判定されていますが、主語が節のSV文と、目的語や補語が節のSVO/
+  SVC文で誤判定が発生していますね。大変申し訳ありません。
+
+  これは、find_sentence_elements 関数内で、節が主語、目的語、補語となる場合の
+  elements["subject"]、elements["dobj"]、elements["complement"]
+  の割り当てがまだ不十分であるためです。特に、cobj や ccomp、xcomp
+  といった依存関係を持つ節が、文の主要素として正しく認識されていないようです。
+
+  この問題を解決するため、find_sentence_elements
+  関数内の主要素（主語、目的語、補語）の検出ロジックをさらに強化します。
+
+  修正案のポイント:
+
+   1. 主語の検出: nsubj と csubj を引き続き使用します。
+   2. 目的語の検出: dobj と cobj を引き続き使用します。
+   3. 補語の検出: attr, acomp, oprd に加えて、ccomp と xcomp も補語として直接検出するようにします。
+   4. SVOCの特殊処理の調整: elements["dobj"] がまだ設定されていない場合にのみ、ccomp や xcomp の子要素である
+      nsubj を elements["dobj"] として割り当てるように調整します。これにより、「She made me
+      happy.」のようなケースで me が正しく目的語として認識されます。
+
+
+
+      在の find_sentence_elements 関数内の目的語検出ロジックは以下のようになっています。
+
+   1             for child in main_verb.children:
+   2                 if child.dep_ == "dobj" or child.dep_ == "cobj": # cobjを追加
+   3                     elements["dobj"] = child
+
+  このロジックでは、ccomp は dobj や cobj として直接検出されません。そのため、「I know that he is
+  rich.」のような文で、that he is rich
+  という節が目的語として正しく認識されず、SVOと判定されない原因となっていました。
+
+  この問題を解決するため、find_sentence_elements 関数内の目的語検出ロジックをさらに強化し、ccomp
+  も目的語として考慮するように修正します。ただし、ccomp
+  は補語としても使われるため、文脈に応じた判断が必要です。ここでは、ccomp
+  が動詞の直接の目的語として機能している場合に dobj として割り当てるようにします。
+
+  修正案:
+
+  find_sentence_elements 関数内の目的語と補語を探す部分を以下のように修正します。
+
+    1             # 目的語と補語を探す
+    2             # Initial pass for direct children
+    3             for child in main_verb.children:
+    4                 if child.dep_ == "dobj" or child.dep_ == "cobj": # cobjを追加
+    5                     elements["dobj"] = child
+    6                 if child.dep_ in ["iobj", "dative"]:
+    7                     elements["iobj"] = child
+    8                 # General complement detection
+    9                 if child.dep_ in ["attr", "acomp", "oprd", "ccomp", "xcomp"]: # ccomp, xcompを追加
+   10                     elements["complement"] = child
+   11
+   12             # Special handling for indirect objects introduced by prepositions (e.g., "to me",
+      "for him")
+   13             if not elements["iobj"] and main_verb: # 間接目的語がまだ見つかっていない場合のみ
+   14                 for child in main_verb.children:
+   15                     if child.dep_ == "prep" and child.text.lower() in ["to", "for"]: #
+      前置詞が"to"または"for"の場合
+   16                         # Check if the preposition has a pobj (object of preposition)
+   17                         pobj_token = next((grandchild for grandchild in child.children if
+      grandchild.dep_ == "pobj"), None)
+   18                         if pobj_token:
+   19                             elements["iobj"] = pobj_token # 前置詞の目的語を間接目的語として扱う
+   20                             break # Found indirect object, exit loop
+   21
+   22             # Special handling for SVOC where spaCy might use \'ccomp\' or \'xcomp\' for the
+      complement
+   23             # and \'nsubj\' for the object within that \'ccomp\' or \'xcomp\'
+   24             # This block should only run if dobj is not yet found, but a potential complement
+      (ccomp/xcomp) is.\n            # This is to correctly identify the \'object\' in \"She made me
+      happy\" where \'me\' is nsubj of \'happy\'.
+   25             if not elements["dobj"] and elements["complement"] and main_verb: # Check if dobj is
+      missing but complement is found
+   26                 # Check if the complement is a ccomp or xcomp and has a nsubj child
+   27                 if elements["complement"].dep_ in ["ccomp", "xcomp"]:\
+   28                     comp_token = elements["complement"]
+   29                     comp_subject = next((grandchild for grandchild in comp_token.children if
+      grandchild.dep_ == "nsubj"), None)
+   30
+   31                     if comp_subject and comp_token.pos_ in ["ADJ", "NOUN", "PROPN", "VERB"]:\
+   32                         elements["dobj"] = comp_subject # Assign the nsubj of the complement as
+      dobj
+   33
+   34             # Add ccomp as dobj if it's a direct object clause
+   35             if not elements["dobj"] and main_verb:
+   36                 for child in main_verb.children:
+   37                     if child.dep_ == "ccomp" and child.pos_ == "VERB": #
+      ccompが動詞で、直接目的語節の場合
+   38                         elements["dobj"] = child
+   39                         break
+
+  この修正により、「I know that he is rich.」のような文で、that he is rich
+  という節が目的語として正しく認識され、SVOと判定されるようになるはずです。
+
+型判定ロジックのさらなる改善点として、「命令文の未対応」が挙げられます。
+
+   * 現状の弱点: 命令文（例: "Go home!"）は、通常、主語（"You"）が省略されます。現在のロジックでは、主語が明示
+     的に見つからない場合、文型を「不明」と判定してしまうか、誤って「SV
+     (第1文型)」と汎用的に判定してしまう可能性があります。
+
+   * 提案する解決策: 主語が検出されない場合でも、動詞が文の根（ROOT）であり、かつ動詞の品詞が VERB
+     である場合に、命令文であると推測し、適切な文型（SVまたはSVO）を割り当てるロジックを追加します。
+
+  修正案の概要:
+
+  find_sentence_elements 関数内の文型判定ロジックの最後に、主語が見つからない場合の処理を追加します。
+
+    1             # ... (既存のs, v, o1, o2, cの割り当て) ...
+    2
+    3             if s and v:
+    4                 # 1. SVOC (最も具体的)
+    5                 # ... (既存のSVOCロジック) ...
+    6                 # 2. SVOO
+    7                 # ... (既存のSVOOロジック) ...
+    8                 # 3. SVC
+    9                 # ... (既存のSVCロジック) ...
+   10                 # 4. SVO
+   11                 # ... (既存のSVOロジック) ...
+   12                 # 5. SV (最も一般的)
+   13                 else:
+   14                     pattern = "SV (第1文型)"
+   15             else: # 主語 (s) がNoneの場合
+   16                 if v and v.pos_ == "VERB" and v.dep_ == "ROOT": #
+      動詞がROOTで、命令形である可能性が高い場合
+   17                     if not o1 and not o2 and not c: # 目的語や補語がない場合
+   18                         pattern = "SV (第1文型) (命令形)"
+   19                     elif o1 and not o2 and not c: # 直接目的語がある場合
+   20                         pattern = "SVO (第3文型) (命令形)"
+   21                     else:
+   22                         pattern = "不明 (命令形)" # より複雑な命令形
+   23                 else:
+   24                     pattern = "不明" # 主語が見つからず、命令形でもない場合
+
+  この修正により、命令文も正しく文型判定できるようになります。
+
+  Be quiet.」のような命令文のSVCも正しく判定できるようになるはずです。
+
+  この変更をテストするために、以下の例文でテストを実行します。
+
+   * "Go home!" (SV)
+   * "Open the door." (SVO)
+   * "Be quiet." (SVC)
+
+   ✦ 「She looked up the word.」のspaCy解析結果は以下の通りです。
+
+   1 She        nsubj   looked  PRON
+   2 looked     ROOT    looked  VERB
+   3 up prt     looked  ADP
+   4 the        deword  DET
+   5 word       pobj    up      NOUN
+   6 .  punct   looked  PUNCT
+
+  この解析結果から、looked が ROOT で VERB、up が prt（不変化詞）として looked の子要素になっています。そして
+  word が pobj（前置詞の目的語）として up の子要素になっています。
+
+  現在の find_sentence_elements 関数内の目的語検出ロジックでは、dobj または cobj を探しています。word は pobj
+  なので、直接目的語として検出されません。
+
+  このため、「She looked up the word.」のような複合動詞のSVO文が正しく判定されない可能性があります。
+
+  この問題を解決するため、find_sentence_elements
+  関数内の目的語検出ロジックをさらに調整し、prt（不変化詞）を持つ動詞の場合に、その prt の子要素である pobj
+  を目的語として考慮するように修正します。
+
+ 関数内の目的語と補語を探す部分を、複合動詞の目的語検出ロジックを含む新しいロジックに置き換えます。
+
+  今回は、複合動詞 (Phrasal Verbs) の扱いに焦点を当てて精査します。複合動詞は、動詞と前置詞や副詞が組み合わさ
+  って新しい意味を持つ動詞句を形成するもので、spaCyの依存関係解析が複雑になることがあります。
+
+  例:
+   * "She looked up the word." (SVO)
+   * "He turned on the light." (SVO)
+
+  これらの例文で、現在の find_sentence_elements 関数が正しく文型を判定できるかテストします。
+
+   今回は、形式主語 (Expletives) を含む文の扱いに焦点を当てて精査します。There is... や It is... のような構文
+  は、文法的な主語と意味的な主語が異なるため、現在のロジックで正しく文型を判定できるか確認が必要です。
+
+  例:
+   * "There is a book on the table." (SV)
+   * "It is important to learn English." (SVC)
+
+  これらの例文で、現在の find_sentence_elements 関数が正しく文型を判定できるかテストします。
+
+
+There is a book on the table.」のspaCy解析結果は以下の通りです。
+
+   1 There      expis   PRON
+   2 is ROOis   VERB
+   3 a  det     book    DET
+   4 book       attis   NOUN
+   5 on prep    book    ADP
+   6 the        detable DET
+   7 table      pobon   NOUN
+   8 .  puncis  PUNCT
+
+  この解析結果から、There が expl（虚辞）として is の子要素になっています。そして、book が attr（属性）として
+  is の子要素になっています。
+
+  現在の find_sentence_elements 関数では、expl は主語として認識されません。また、attr
+  は補語として認識されますが、There is... 構文の「真の主語」である book が elements["subject"]
+  に割り当てられないため、文型判定が正しく行われない可能性があります。
+
+  この問題を解決するため、find_sentence_elements 関数内の主語検出ロジックを調整し、expl
+  が存在する場合に、attr や nsubj
+  として動詞の子要素になっているトークンを真の主語として考慮するように修正します。
+
+  修正案:
+
+  find_sentence_elements 関数内の主語検出部分を以下のように修正します。
+
+    1             # 能動態の主語 (nsubj, csubj) を探す
+    2             for child in main_verb.children:
+    3                 if child.dep_ == "nsubj" or child.dep_ == "csubj":
+    4                     elements["subject"] = child
+    5                     break
+    6 
+    7             # 形式主語 (expl) が存在する場合の真の主語の検出
+    8             if not elements["subject"] and main_verb: # 主語がまだ見つかっていない場合のみ
+    9                 for child in main_verb.children:
+   10                     if child.dep_ == "expl": # expl (形式主語) が存在する場合
+   11                         # explの動詞の子要素から真の主語を探す (nsubj, attrなど)
+   12                         true_subject = next((grandchild for grandchild in main_verb.children if
+      grandchild.dep_ in ["nsubj", "attr"]), None)
+   13                         if true_subject:
+   14                             elements["subject"] = true_subject
+   15                             break
+
+  この修正により、「There is a book on the table.」のような文で、book
+  が真の主語として認識され、SV文型として正しく判定されるようになるはずです。
+
+
+   実装状況の精査と総合評価
+
+  まず、これまでの開発プロセスは非常に論理的であり、計画されたロードマップに沿って着実に機能が実装されているこ
+  とを確認しました。特に、以下の点は高く評価できます。
+
+   * 段階的な機能拡張: 単純な主語・動詞の特定から、文型、句構造、節構造へと、学習者の理解度に合わせて機能が拡張
+     されており、教育的配慮がなされています。
+   * 優れたUI/UX: st.tabsの導入により、複雑な情報を「文の骨格」「句の分解」「節の構造」といった目的別に整理し、
+     学習者が混乱しないように設計されています。これは非常に効果的です。
+   * キャッシュ戦略: @st.cache_resourceと@st.cache_dataを適切に利用し、アプリケーションのパフォーマンスを最適化
+     しようという意図が見られます。
+
+  その上で、ご依頼の通り、現在のコードに潜む「盲点」を洗い出し、より堅牢で保守性の高い構造にするための視点を提
+  示します。
+
+  盲点と改善提案
+
+  現在の実装における最大の盲点は、`find_sentence_elements`関数が肥大化し、多くの責務を一人で背負っている点で
+  す。
+
+   1. 責務の重複と複雑性:
+       * 現状: この単一の関数が、「能動態/受動態の判定」「主語、動詞、目的語、補語の探索」「5文型のパターンマッ
+         チング」「命令形の判定」という、それぞれが独立していてもおかしくない複数のロジックを内包しています。
+       * 問題点:
+           * 可読性の低下: コードが長大で複雑になり、後から修正やデバッグを行う際に、どこがどの処理に対応してい
+             るのかを把握するのが困難になっています。
+           * 保守性の低下: 例えば、SVOCの判定ロジックを少し変更したいだけでも、関数全体への影響を慎重に考慮する
+             必要があり、変更が容易ではありません。
+           * テストの困難さ: この関数一つをテストするためには、受動態、SVOO、命令形など、すべてのパターンを網羅
+             する必要があり、単体テストが非常に書きにくくなっています。
+
+   2. エラーへの耐性:
+       * 現状: ロジックが複雑に絡み合っているため、予期せぬ文構造（例: spaCyが想定外の依存関係を返した場合）が
+         入力された際に、意図しない文型に誤判定されたり、エラーが発生したりする可能性が残っています。
+
+  提案：ロジックの分割と責務の明確化によるリファクタリング
+
+  この問題を解決するため、現在のfind_sentence_elements関数を、責務ごとに小さなヘルパー関数に分割するリファク
+  タリングを提案します。これにより、コードの可読性、保守性、堅牢性が大幅に向上します。
+
+  リファクタリング方針:
+
+   1. `_detect_voice_and_verb(doc)`: 文の態（能動態/受動態）を判定し、中心となる動詞を返すヘルパー関数。
+   2. `_find_active_elements(verb, doc)`: 能動態の文から主要素（S, O, C）を見つけるヘルパー関数。
+   3. `_find_passive_elements(verb, doc)`: 受動態の文から主要素（S, 動作主）を見つけるヘルパー関数。
+   4. `_determine_pattern(elements)`: 抽出された要素の辞書を受け取り、最終的な文型名を決定するヘルパー関数。
+
+  メインのfind_sentence_elements関数は、これらのヘルパー関数を順番に呼び出す、見通しの良い「司令塔」の役割に
+  徹します。
+
+  このリファクタリングにより、各機能が独立するため、今後の機能追加（例:
+  新しい文法パターンの追加）や修正が、他の部分に影響を与えることなく安全かつ容易になります。
+
+
+置換に失敗しました。
+  これは、私が replace ツールの old_string
+  パラメータに、現在のファイル内容と完全に一致しない文字列を渡していることが原因です。
+
+  この問題を解決し、提案したリファクタリングを確実に適用するため、以下の手順で進めます。
+
+   1. `app.py`のバックアップ: 現在のapp.pyをapp_backup.pyとしてコピーし、安全に保管します。
+   2. `app.py`の書き換え: write_fileツールを使い、提案した新しいコードでapp.pyの内容を完全に上書きします。
+
+  この方法であれば、old_stringの不一致問題は発生せず、確実にコードを更新できます。
+
   
+
+
+
